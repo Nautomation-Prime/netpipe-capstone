@@ -4,13 +4,16 @@ netpipe command line interface.
 """
 
 import argparse
+import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from netpipe.collect import CollectionError, fetch_running_config
+from netpipe.deploy import deploy
 from netpipe.diff import config_diff, summarise
 from netpipe.intent import IntentError, load_intent
+from netpipe.inventory import build_nornir
 from netpipe.models import off_profile_interfaces
 from netpipe.preflight import DeviceReport, preflight_device
 from netpipe.render import RenderError, render_site
@@ -164,6 +167,78 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     return 1 if blocked else 0
 
 
+def cmd_deploy(args: argparse.Namespace) -> int:
+    try:
+        intent = load_intent(args.intent)
+    except IntentError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return 1
+
+    settings = load_settings()
+
+    logging.basicConfig(
+        level=settings.log_level,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+    # 1. Render
+    try:
+        render_site(intent)
+    except RenderError as exc:
+        print(f"✗ render failed: {exc}", file=sys.stderr)
+        return 1
+
+    # 2. Pre-flight
+    print("Running pre-flight...")
+    with ThreadPoolExecutor(max_workers=settings.max_workers) as pool:
+        reports = list(pool.map(
+            lambda device: preflight_device(device, settings), intent.devices))
+
+    cleared = [r.device for r in reports if r.cleared]
+    blocked = [r for r in reports if not r.cleared]
+
+    for report in blocked:
+        reasons = ", ".join(c.name for c in report.failures)
+        print(f"  ✗ {report.device} blocked: {reasons}")
+
+    if not cleared:
+        print("\n✗ No devices cleared pre-flight. Nothing to do.", file=sys.stderr)
+        return 1
+
+    print(f"  ✓ {len(cleared)} device(s) cleared\n")
+
+    # 3. Confirm
+    print(f"About to configure {len(cleared)} device(s) "
+          f"in batches of {settings.batch_size}:")
+    for name in cleared:
+        print(f"    {name}")
+    print(f"\nChange reference: {intent.change_reference}")
+
+    if args.dry_run:
+        print("\n(dry run — nothing was sent)")
+        return 0
+
+    if settings.require_approval:
+        answer = input("\nType the change reference to proceed: ").strip()
+        if answer != intent.change_reference:
+            print("✗ Not confirmed. Nothing was sent.", file=sys.stderr)
+            return 1
+
+    # 4. Deploy
+    nr = build_nornir(intent, settings)
+    outcome = deploy(nr, intent, settings, cleared)
+
+    print(f"\n✓ {len(outcome.succeeded)} succeeded")
+    if outcome.failed:
+        print(f"✗ {len(outcome.failed)} failed")
+        for name, reason in outcome.failed.items():
+            print(f"    {name}: {reason}")
+    if outcome.skipped:
+        print(f"– {len(outcome.skipped)} skipped: {', '.join(outcome.skipped)}")
+
+    return 1 if outcome.failed else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Options every subcommand shares. Defining them on a parent parser
     # means `netpipe show --intent X` works — which is the order people
@@ -197,6 +272,12 @@ def build_parser() -> argparse.ArgumentParser:
     preflight = sub.add_parser("preflight", parents=[common],
                                help="run pre-flight gates (read-only)")
     preflight.set_defaults(func=cmd_preflight)
+
+    deploy_cmd = sub.add_parser("deploy", parents=[common],
+                                help="apply configuration to devices")
+    deploy_cmd.add_argument("--dry-run", action="store_true",
+                            help="do everything except send configuration")
+    deploy_cmd.set_defaults(func=cmd_deploy)
 
     return parser
 
