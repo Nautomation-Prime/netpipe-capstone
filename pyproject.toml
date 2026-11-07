@@ -1,0 +1,3 @@
+[tool.pytest.ini_options]
+# Lets a plain `pytest` import the netpipe package from the project root
+pythonpath = ["."]

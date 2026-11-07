@@ -1,0 +1,78 @@
+---
+# Site intent for MAN1 — access layer
+# This file describes what the site SHOULD look like.
+# It does not describe how to achieve it.
+
+version: 1
+site: MAN1
+description: Manchester campus, building 1, access layer
+change_reference: CHG0047821
+
+defaults:
+  domain_name: example.internal
+  ntp_servers:
+    - 10.0.0.10
+    - 10.0.0.11
+  syslog_server: 10.0.0.20
+  unused_vlan: 999
+  mtu: 1500
+
+vlans:
+  - id: 10
+    name: USERS
+    description: General user access
+  - id: 20
+    name: VOICE
+    description: IP telephony
+  - id: 30
+    name: PRINTERS
+    description: Managed print devices
+  - id: 999
+    name: PARKING
+    description: Shutdown holding VLAN for unused ports
+
+devices:
+  - name: man1-acc-sw-01
+    mgmt_ip: 10.1.1.11
+    platform: iosxe
+    role: access
+    model: C9300-48P
+    interfaces:
+      - name: GigabitEthernet1/0/1
+        description: Desk 101
+        mode: access
+        access_vlan: 10
+        voice_vlan: 20
+      - name: GigabitEthernet1/0/2
+        description: Desk 102
+        mode: access
+        access_vlan: 10
+        voice_vlan: 20
+      - name: GigabitEthernet1/0/3
+        description: Print room
+        mode: access
+        access_vlan: 30
+      - name: TenGigabitEthernet1/1/1
+        description: Uplink to man1-dist-sw-01
+        mode: trunk
+        trunk_vlans: [10, 20, 30]
+
+  - name: man1-acc-sw-02
+    mgmt_ip: 10.1.1.12
+    platform: iosxe
+    role: access
+    model: C9300-24P
+    interfaces:
+      - name: GigabitEthernet1/0/1
+        description: Desk 201
+        mode: access
+        access_vlan: 10
+        voice_vlan: 20
+      - name: GigabitEthernet1/0/2
+        description: Meeting room AV
+        mode: access
+        access_vlan: 10
+      - name: TenGigabitEthernet1/1/1
+        description: Uplink to man1-dist-sw-01
+        mode: trunk
+        trunk_vlans: [10, 20, 30]
