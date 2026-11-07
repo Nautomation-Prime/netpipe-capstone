@@ -1,0 +1,55 @@
+{#
+Template: access_switch.j2
+Purpose:  Full access-layer switch configuration for {{ site }}
+Context:  device (Device), site (str), defaults (Defaults), vlans (list[Vlan])
+Note:     This renders a COMPLETE interface configuration. Every physical
+          port appears, including unused ones. See chapter 2 on expansion.
+#}
+hostname {{ device.name }}
+!
+ip domain name {{ defaults.domain_name }}
+!
+{% for server in defaults.ntp_servers %}
+ntp server {{ server }}
+{% endfor %}
+!
+logging host {{ defaults.syslog_server }}
+!
+{% for vlan in vlans %}
+vlan {{ vlan.id }}
+ name {{ vlan.name }}
+{% endfor %}
+!
+{% for interface in device.interfaces %}
+interface {{ interface.name }}
+{% if interface.description %}
+ description {{ interface.description }}
+{% endif %}
+{% if interface.mode == 'access' %}
+ switchport mode access
+ switchport access vlan {{ interface.access_vlan }}
+{% if interface.voice_vlan %}
+ switchport voice vlan {{ interface.voice_vlan }}
+{% endif %}
+ spanning-tree portfast
+ spanning-tree bpduguard enable
+{% elif interface.mode == 'trunk' %}
+ switchport mode trunk
+ switchport trunk allowed vlan {{ interface.trunk_vlans | join(',') }}
+{% elif interface.mode == 'unused' %}
+ switchport mode access
+ switchport access vlan {{ interface.access_vlan }}
+ spanning-tree portfast
+ spanning-tree bpduguard enable
+{% elif interface.mode == 'routed' %}
+ no switchport
+ ip address {{ interface.ip_address.ip }} {{ interface.ip_address.netmask }}
+{% endif %}
+{% if interface.enabled %}
+ no shutdown
+{% else %}
+ shutdown
+{% endif %}
+!
+{% endfor %}
+end
