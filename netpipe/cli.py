@@ -4,15 +4,17 @@ netpipe command line interface.
 """
 
 import argparse
-import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from netpipe.collect import CollectionError, fetch_running_config
 from netpipe.diff import config_diff, summarise
 from netpipe.intent import IntentError, load_intent
 from netpipe.models import off_profile_interfaces
+from netpipe.preflight import DeviceReport, preflight_device
 from netpipe.render import RenderError, render_site
+from netpipe.settings import load_settings
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -77,12 +79,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
         print("\n(offline — no devices contacted, no diff produced)")
         return 0
 
-    username = os.environ.get("NETAUTO_USERNAME", "")
-    password = os.environ.get("NETAUTO_PASSWORD", "")
-    if not username or not password:
-        print("✗ set NETAUTO_USERNAME and NETAUTO_PASSWORD "
-              "(chapter 4 does this properly)", file=sys.stderr)
-        return 1
+    settings = load_settings()
+    username = settings.username
+    password = settings.password.get_secret_value()
 
     diff_dir = Path("artefacts/diff")
     diff_dir.mkdir(parents=True, exist_ok=True)
@@ -125,6 +124,46 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def cmd_preflight(args: argparse.Namespace) -> int:
+    """Run pre-flight gates against every device in the intent."""
+    try:
+        intent = load_intent(args.intent)
+    except IntentError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return 1
+
+    settings = load_settings()
+
+    print(f"Pre-flight for {intent.site} ({len(intent.devices)} devices)\n")
+
+    with ThreadPoolExecutor(max_workers=settings.max_workers) as pool:
+        reports: list[DeviceReport] = list(pool.map(
+            lambda device: preflight_device(device, settings),
+            intent.devices,
+        ))
+
+    for report in reports:
+        mark = "✓" if report.cleared else "✗"
+        print(f"{mark} {report.device}")
+        for check in report.checks:
+            symbol = "✓" if check.passed else "✗"
+            print(f"    {symbol} {check.name:<20} {check.detail}")
+        print()
+
+    cleared = [r for r in reports if r.cleared]
+    blocked = [r for r in reports if not r.cleared]
+
+    print(f"{len(cleared)} cleared, {len(blocked)} blocked")
+
+    if blocked:
+        print("\nBlocked devices will be skipped by deploy:")
+        for report in blocked:
+            reasons = ", ".join(check.name for check in report.failures)
+            print(f"  {report.device}: {reasons}")
+
+    return 1 if blocked else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Options every subcommand shares. Defining them on a parent parser
     # means `netpipe show --intent X` works — which is the order people
@@ -154,6 +193,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--show", action="store_true",
                       help="print the full diff, not just a summary")
     plan.set_defaults(func=cmd_plan)
+
+    preflight = sub.add_parser("preflight", parents=[common],
+                               help="run pre-flight gates (read-only)")
+    preflight.set_defaults(func=cmd_preflight)
 
     return parser
 
