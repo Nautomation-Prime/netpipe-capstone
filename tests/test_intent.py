@@ -1,17 +1,17 @@
 import pytest
 
-from netpipe.intent import load_raw_intent
+from netpipe.intent import IntentError, load_intent
 
 
 def test_loads_real_intent_file():
-    intent = load_raw_intent("intent/man1.yaml")
-    assert intent["site"] == "MAN1"
-    assert len(intent["devices"]) == 2
+    intent = load_intent("intent/man1.yaml")
+    assert intent.site == "MAN1"
+    assert len(intent.devices) == 2
 
 
 def test_missing_file_is_a_clear_error():
-    with pytest.raises(FileNotFoundError, match="Intent file not found"):
-        load_raw_intent("intent/nope.yaml")
+    with pytest.raises(IntentError, match="Intent file not found"):
+        load_intent("intent/nope.yaml")
 
 
 def test_no_credentials_in_intent():

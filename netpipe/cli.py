@@ -6,26 +6,45 @@ netpipe command line interface.
 import argparse
 import sys
 
-from netpipe.intent import load_raw_intent
+from netpipe.intent import IntentError, load_intent
+from netpipe.models import off_profile_interfaces
 
 
-def cmd_show(args: argparse.Namespace) -> int:
-    """Print a summary of an intent file."""
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Validate an intent file and report what it describes."""
     try:
-        intent = load_raw_intent(args.intent)
-    except (FileNotFoundError, ValueError) as exc:
+        intent = load_intent(args.intent)
+    except IntentError as exc:
         print(f"✗ {exc}", file=sys.stderr)
         return 1
 
-    print(f"Site:    {intent.get('site')}")
-    print(f"Change:  {intent.get('change_reference')}")
-    print(f"VLANs:   {len(intent.get('vlans', []))}")
-    print(f"Devices: {len(intent.get('devices', []))}\n")
+    print(f"✓ {args.intent} is valid\n")
+    print(f"  Site:    {intent.site} — {intent.description}")
+    print(f"  Change:  {intent.change_reference}")
+    print(f"  VLANs:   {', '.join(str(v.id) for v in intent.vlans)}\n")
 
-    for device in intent.get("devices", []):
-        described = len(device.get("interfaces", []))
-        print(f"  {device['name']:<20} {device['mgmt_ip']:<12} "
-              f"{device.get('model', '?'):<12} {described} interfaces described")
+    warnings: list[str] = []
+
+    for device in intent.devices:
+        modes: dict[str, int] = {}
+        for interface in device.interfaces:
+            modes[interface.mode] = modes.get(interface.mode, 0) + 1
+
+        summary = "  ".join(f"{count} {mode}"
+                            for mode, count in sorted(modes.items()))
+        print(f"  {device.name:<20} {device.model:<12} "
+              f"{len(device.interfaces):>3} ports   {summary}")
+
+        for name in off_profile_interfaces(device):
+            warnings.append(
+                f"{device.name}/{name} is not part of a {device.model} "
+                "hardware profile — it will be configured, but check the name"
+            )
+
+    if warnings:
+        print()
+        for warning in warnings:
+            print(f"  ⚠ {warning}")
 
     return 0
 
@@ -48,9 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    show = sub.add_parser("show", parents=[common],
-                          help="summarise an intent file")
-    show.set_defaults(func=cmd_show)
+    validate = sub.add_parser("validate", parents=[common],
+                              help="validate an intent file")
+    validate.set_defaults(func=cmd_validate)
 
     return parser
 
