@@ -4,6 +4,7 @@ netpipe command line interface.
 """
 
 import argparse
+import json
 import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +19,7 @@ from netpipe.models import off_profile_interfaces
 from netpipe.preflight import DeviceReport, preflight_device
 from netpipe.render import RenderError, render_site
 from netpipe.settings import load_settings
+from netpipe.verify import snapshot, verify_device
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -239,6 +241,84 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     return 1 if outcome.failed else 0
 
 
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    """Capture operational state. Run this before deploying."""
+    from netpipe.testbed import build_testbed   # imports pyATS — see below
+
+    try:
+        intent = load_intent(args.intent)
+    except IntentError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return 1
+
+    settings = load_settings()
+    testbed = build_testbed(intent, settings)
+
+    print(f"Capturing '{args.label}' state for {intent.site}...\n")
+
+    failures = 0
+    for device in intent.devices:
+        try:
+            state = snapshot(testbed, device.name, args.label)
+            counts = ", ".join(
+                f"{len(value)} {key}" for key, value in state.items())
+            print(f"  ✓ {device.name:<20} {counts}")
+        except Exception as exc:
+            print(f"  ✗ {device.name:<20} {exc}")
+            failures += 1
+
+    print(f"\nWritten to artefacts/state/*-{args.label}.json")
+    return 1 if failures else 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Verify applied state against intent and the pre-change snapshot."""
+    from netpipe.testbed import build_testbed
+
+    try:
+        intent = load_intent(args.intent)
+    except IntentError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return 1
+
+    settings = load_settings()
+    testbed = build_testbed(intent, settings)
+
+    print(f"Verifying {intent.site}...\n")
+
+    reports = []
+    for device in intent.devices:
+        before_path = Path("artefacts/state") / f"{device.name}-before.json"
+        if not before_path.exists():
+            print(f"  ⚠ {device.name}: no 'before' snapshot — "
+                  "collateral checks skipped")
+            before = {}
+        else:
+            before = json.loads(before_path.read_text(encoding="utf-8"))
+
+        reports.append(verify_device(testbed, device, intent, before))
+
+    errors = 0
+    for report in reports:
+        mark = "✓" if report.passed else "✗"
+        print(f"{mark} {report.device}")
+
+        for finding in report.findings:
+            symbol = {"error": "✗", "warning": "⚠", "info": "·"}[finding.severity]
+            print(f"    {symbol} {finding.subject:<28} {finding.detail}")
+            if finding.severity == "error":
+                errors += 1
+
+        if not report.findings:
+            print("    · no findings")
+        print()
+
+    passed = [r for r in reports if r.passed]
+    print(f"{len(passed)}/{len(reports)} device(s) verified, {errors} error(s)")
+
+    return 1 if errors else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Options every subcommand shares. Defining them on a parent parser
     # means `netpipe show --intent X` works — which is the order people
@@ -278,6 +358,17 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_cmd.add_argument("--dry-run", action="store_true",
                             help="do everything except send configuration")
     deploy_cmd.set_defaults(func=cmd_deploy)
+
+    snap = sub.add_parser("snapshot", parents=[common],
+                          help="capture operational state")
+    snap.add_argument("--label", default="before",
+                      choices=["before", "after"],
+                      help="which snapshot this is (default: %(default)s)")
+    snap.set_defaults(func=cmd_snapshot)
+
+    verify_cmd = sub.add_parser("verify", parents=[common],
+                                help="verify state against intent")
+    verify_cmd.set_defaults(func=cmd_verify)
 
     return parser
 
